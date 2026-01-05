@@ -1,0 +1,60 @@
+name: Price Watcher
+
+on:
+  # Run every 10 minutes
+  schedule:
+    - cron: '*/10 * * * *'
+  # Allow manual triggering
+  workflow_dispatch:
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 xvfb
+      
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Install Playwright browsers
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+      
+      - name: Create config.json from secrets
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+          
+          config = {
+              "telegram_bot_token": os.environ["TELEGRAM_BOT_TOKEN"],
+              "telegram_chat_id": os.environ["TELEGRAM_CHAT_ID"],
+              "watchers": json.loads(os.environ.get("WATCHERS_CONFIG", "[]"))
+          }
+          
+          with open("config.json", "w", encoding="utf-8") as f:
+              json.dump(config, f, indent=2, ensure_ascii=False)
+          EOF
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WATCHERS_CONFIG: ${{ secrets.WATCHERS_CONFIG }}
+      
+      - name: Run price watcher
+        run: xvfb-run -a python3 main.py
