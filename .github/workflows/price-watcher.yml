@@ -85,4 +85,14 @@ jobs:
           WATCHERS_CONFIG: ${{ secrets.WATCHERS_CONFIG }}
       
       - name: Run price watcher
-        run: xvfb-run -a python3 main.py
+        run: |
+          mkdir -p screenshots
+          xvfb-run -a python3 main.py
+      
+      - name: Upload debugging artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_id }}
+          path: screenshots/
+          retention-days: 7

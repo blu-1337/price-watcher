@@ -63,6 +63,16 @@ class PlaywrightWatcher(BaseWatcher):
     def fetch_price(self) -> Optional[float]:
         """Fetch and parse price using Playwright"""
         try:
+            # Detect CI environment for screenshot handling
+            import os
+            is_ci = os.environ.get('CI', 'false').lower() == 'true' or os.environ.get('GITHUB_ACTIONS', 'false').lower() == 'true'
+            screenshot_dir = './screenshots' if is_ci else '/tmp'
+            
+            # Create screenshots directory if in CI
+            if is_ci:
+                os.makedirs(screenshot_dir, exist_ok=True)
+                print(f"[{self.name}] CI environment detected, screenshots will be saved to {screenshot_dir}/")
+            
             print(f"[{self.name}] Starting Playwright browser (headless={self.headless})...")
             
             with self.sync_playwright() as p:
@@ -171,14 +181,15 @@ class PlaywrightWatcher(BaseWatcher):
                     if not cookie_clicked:
                         print(f"[{self.name}] No cookie consent popup found (or already accepted)")
                     
-                    # Take a screenshot for debugging (save to file if not headless, or just log in headless)
+                    # Take a screenshot after cookie consent (always in CI, or if not headless locally)
                     try:
-                        if not self.headless:
-                            screenshot_path = f"/tmp/{self.name.replace(' ', '_')}_screenshot.png"
+                        if is_ci or not self.headless:
+                            safe_name = self.name.replace(' ', '_').replace('/', '_')
+                            screenshot_path = os.path.join(screenshot_dir, f"{safe_name}_after_cookies.png")
                             page.screenshot(path=screenshot_path, full_page=True)
-                            print(f"[{self.name}] Screenshot saved to: {screenshot_path}")
+                            print(f"[{self.name}] ✓ Screenshot saved: {screenshot_path}")
                     except Exception as e:
-                        pass
+                        print(f"[{self.name}] ⚠ Failed to save screenshot: {e}")
                     
                     # Wait for the specific selector to appear (more reliable than fixed timeout)
                     print(f"[{self.name}] Waiting for price element to appear...")
@@ -199,7 +210,17 @@ class PlaywrightWatcher(BaseWatcher):
                     # Get page content
                     html_content = page.content()
                     print(f"[{self.name}] ✓ Page loaded successfully")
-                    print(f"[{self.name}] Response size: {len(html_content)} bytes")
+                    print(f"[{self.name}] 📊 Response size: {len(html_content)} bytes")
+                    
+                    # Take screenshot after page load (before parsing)
+                    try:
+                        if is_ci or not self.headless:
+                            safe_name = self.name.replace(' ', '_').replace('/', '_')
+                            screenshot_path = os.path.join(screenshot_dir, f"{safe_name}_after_load.png")
+                            page.screenshot(path=screenshot_path, full_page=True)
+                            print(f"[{self.name}] ✓ Screenshot saved: {screenshot_path}")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Failed to save screenshot: {e}")
                     
                     # Save HTML for debugging (first 2000 chars)
                     print(f"[{self.name}] First 2000 chars of HTML:")
@@ -209,10 +230,13 @@ class PlaywrightWatcher(BaseWatcher):
                     # Parse with BeautifulSoup
                     soup = BeautifulSoup(html_content, 'html.parser')
                     
-                    # Debug: Show page title
+                    # Debug: Show page title (prominent logging)
                     title = soup.find('title')
                     if title:
-                        print(f"[{self.name}] Page title: {title.get_text(strip=True)[:100]}")
+                        title_text = title.get_text(strip=True)[:100]
+                        print(f"[{self.name}] 📄 Page title: {title_text}")
+                    else:
+                        print(f"[{self.name}] ⚠ No page title found")
                     
                     # Debug: Check for common blocking indicators
                     body_text = soup.find('body')
@@ -250,6 +274,17 @@ class PlaywrightWatcher(BaseWatcher):
                     if not price_element:
                         print(f"[{self.name}] ✗ Price element not found with selector: {self.selector}")
                         print(f"[{self.name}] Trying to find alternative elements...")
+                        
+                        # Take screenshot when element not found (for debugging blocking pages)
+                        try:
+                            if is_ci or not self.headless:
+                                safe_name = self.name.replace(' ', '_').replace('/', '_')
+                                screenshot_path = os.path.join(screenshot_dir, f"{safe_name}_element_not_found.png")
+                                page.screenshot(path=screenshot_path, full_page=True)
+                                print(f"[{self.name}] 📸 Screenshot saved (element not found): {screenshot_path}")
+                        except Exception as e:
+                            print(f"[{self.name}] ⚠ Failed to save screenshot: {e}")
+                        
                         # Try to find any elements with similar classes for debugging
                         all_divs = soup.select('div.mt-auto')
                         if all_divs:
