@@ -30,8 +30,6 @@ class PlaywrightWatcher(BaseWatcher):
         super().__init__(name, url, threshold, config)
         self.selector = config.get('selector')
         self.price_index = config.get('price_index', 0)
-        self.wait_time = config.get('wait_time', 5000)
-        self.page_timeout = config.get('timeout', 30000)
         
         # For GitHub Actions/CI: use headed mode with xvfb (less detectable than headless)
         # Check if we're in CI environment (GitHub Actions sets CI=true)
@@ -41,10 +39,17 @@ class PlaywrightWatcher(BaseWatcher):
         if is_ci:
             # In CI, use headed mode (xvfb will provide display) - this avoids headless detection
             self.headless = False
+            # Increase wait times for CI environments (more conservative)
+            self.wait_time = config.get('wait_time', 10000)  # Default 10s in CI
+            self.network_idle_timeout = config.get('network_idle_timeout', 15000)  # 15s for network idle
             print(f"[{self.name}] Detected CI environment, using headed mode with xvfb")
         else:
             self.headless = config.get('headless', True)
+            self.wait_time = config.get('wait_time', 5000)  # Default 5s locally
+            self.network_idle_timeout = config.get('network_idle_timeout', 10000)  # 10s for network idle
         
+        self.page_timeout = config.get('timeout', 30000)
+        self.retries = config.get('retries', 3)  # Default 3 retries
         self.cookie_selector = config.get('cookie_selector')  # Optional custom cookie selector
         
         if not self.selector:
@@ -61,7 +66,32 @@ class PlaywrightWatcher(BaseWatcher):
             )
     
     def fetch_price(self) -> Optional[float]:
-        """Fetch and parse price using Playwright"""
+        """Fetch and parse price using Playwright with retry logic"""
+        import time
+        
+        for attempt in range(self.retries):
+            try:
+                if attempt > 0:
+                    wait_time = attempt * 2  # Exponential backoff: 2s, 4s, 6s
+                    print(f"[{self.name}] Retry attempt {attempt + 1}/{self.retries} after {wait_time}s...")
+                    time.sleep(wait_time)
+                
+                result = self._fetch_price_once()
+                if result is not None:
+                    return result
+                else:
+                    print(f"[{self.name}] Attempt {attempt + 1}/{self.retries} returned None, will retry...")
+            except Exception as e:
+                print(f"[{self.name}] Attempt {attempt + 1}/{self.retries} failed: {e}")
+                if attempt == self.retries - 1:
+                    # Last attempt, re-raise
+                    raise
+        
+        print(f"[{self.name}] All {self.retries} attempts failed to fetch price")
+        return None
+    
+    def _fetch_price_once(self) -> Optional[float]:
+        """Single attempt to fetch and parse price using Playwright"""
         try:
             # Detect CI environment for screenshot handling
             import os
@@ -129,11 +159,19 @@ class PlaywrightWatcher(BaseWatcher):
                 
                 try:
                     print(f"[{self.name}] Navigating to: {self.url}")
-                    # Use domcontentloaded for faster initial load, then wait for content
-                    page.goto(self.url, wait_until='domcontentloaded', timeout=self.page_timeout)
+                    # Use 'load' to wait for full page load, then wait for network idle
+                    page.goto(self.url, wait_until='load', timeout=self.page_timeout)
                     
-                    # Wait for JavaScript to execute and content to load
-                    page.wait_for_timeout(3000)
+                    # Wait for network to be idle (no requests for 500ms)
+                    print(f"[{self.name}] Waiting for network to be idle (timeout: {self.network_idle_timeout}ms)...")
+                    try:
+                        page.wait_for_load_state('networkidle', timeout=self.network_idle_timeout)
+                        print(f"[{self.name}] ✓ Network is idle")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Network idle timeout: {e}, continuing anyway...")
+                    
+                    # Additional wait for JavaScript to execute
+                    page.wait_for_timeout(2000)
                     
                     # Handle cookie consent popup (common on German/EU sites)
                     print(f"[{self.name}] Checking for cookie consent popup...")
@@ -191,21 +229,105 @@ class PlaywrightWatcher(BaseWatcher):
                     except Exception as e:
                         print(f"[{self.name}] ⚠ Failed to save screenshot: {e}")
                     
+                    # Escape selector for use in JavaScript (needed throughout function)
+                    escaped_selector = self.selector.replace("'", "\\'").replace('"', '\\"')
+                    
                     # Wait for the specific selector to appear (more reliable than fixed timeout)
                     print(f"[{self.name}] Waiting for price element to appear...")
                     try:
-                        page.wait_for_selector(self.selector, timeout=self.wait_time)
+                        page.wait_for_selector(self.selector, timeout=self.wait_time, state='visible')
                         print(f"[{self.name}] ✓ Price element found on page")
                     except Exception as e:
-                        print(f"[{self.name}] ⚠ Price element not found after waiting, trying anyway...")
+                        print(f"[{self.name}] ⚠ Price element not found after waiting: {e}")
+                        # Try fallback: use page.evaluate() to check if element exists
+                        element_exists = page.evaluate(f"""
+                            () => {{
+                                const el = document.querySelector('{escaped_selector}');
+                                return el !== null;
+                            }}
+                        """)
+                        if not element_exists:
+                            print(f"[{self.name}] ✗ Element does not exist in DOM, cannot proceed")
+                            return None
+                        print(f"[{self.name}] Element exists in DOM but not visible, trying anyway...")
                     
-                    # Additional wait for any dynamic content
-                    print(f"[{self.name}] Waiting additional {self.wait_time}ms for content to stabilize...")
-                    page.wait_for_timeout(self.wait_time)
+                    # Wait for element to have actual text content (not just be present)
+                    print(f"[{self.name}] Waiting for element to have text content...")
+                    try:
+                        page.wait_for_function(
+                            f"document.querySelector('{escaped_selector}')?.textContent?.trim()",
+                            timeout=self.wait_time
+                        )
+                        print(f"[{self.name}] ✓ Element has text content")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Element text content wait timeout: {e}, checking anyway...")
+                        # Fallback: use page.evaluate() to check content directly
+                        has_content = page.evaluate(f"""
+                            () => {{
+                                const el = document.querySelector('{escaped_selector}');
+                                return el && el.textContent && el.textContent.trim();
+                            }}
+                        """)
+                        if not has_content:
+                            print(f"[{self.name}] ✗ Element has no text content")
+                            return None
+                    
+                    # Additional wait for any dynamic content to stabilize
+                    print(f"[{self.name}] Waiting additional 2000ms for content to stabilize...")
+                    page.wait_for_timeout(2000)
                     
                     # Get page URL to check for redirects
                     current_url = page.url
                     print(f"[{self.name}] Current URL: {current_url}")
+                    
+                    # Enhanced element verification before getting content
+                    print(f"[{self.name}] Verifying element visibility and content...")
+                    element_locator = page.locator(self.selector)
+                    
+                    try:
+                        is_visible = element_locator.is_visible(timeout=2000)
+                        print(f"[{self.name}] Element visibility: {is_visible}")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Could not check visibility: {e}")
+                        is_visible = False
+                    
+                    # Get text content directly from Playwright (more reliable than HTML parsing)
+                    try:
+                        playwright_text = element_locator.text_content(timeout=2000)
+                        if playwright_text and playwright_text.strip():
+                            print(f"[{self.name}] ✓ Element text content (from Playwright): {repr(playwright_text[:100])}")
+                            # Try parsing directly from Playwright text first
+                            parsed_price = self._parse_price(playwright_text.strip())
+                            if parsed_price is not None:
+                                print(f"[{self.name}] ✓ Successfully parsed price from Playwright text content")
+                                return parsed_price
+                            else:
+                                print(f"[{self.name}] ⚠ Failed to parse Playwright text, falling back to HTML parsing...")
+                        else:
+                            print(f"[{self.name}] ⚠ Element has no text content from Playwright")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Could not get text content from Playwright: {e}")
+                    
+                    # Log element's computed style for debugging
+                    try:
+                        computed_style = page.evaluate(f"""
+                            () => {{
+                                const el = document.querySelector('{escaped_selector}');
+                                if (!el) return null;
+                                const style = window.getComputedStyle(el);
+                                return {{
+                                    display: style.display,
+                                    visibility: style.visibility,
+                                    opacity: style.opacity,
+                                    height: style.height,
+                                    width: style.width
+                                }};
+                            }}
+                        """)
+                        if computed_style:
+                            print(f"[{self.name}] Element computed style: {computed_style}")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Could not get computed style: {e}")
                     
                     # Get page content
                     html_content = page.content()
@@ -275,6 +397,24 @@ class PlaywrightWatcher(BaseWatcher):
                         print(f"[{self.name}] ✗ Price element not found with selector: {self.selector}")
                         print(f"[{self.name}] Trying to find alternative elements...")
                         
+                        # Fallback: Try using page.evaluate() for direct DOM access
+                        print(f"[{self.name}] Attempting fallback: direct DOM access via page.evaluate()...")
+                        try:
+                            fallback_text = page.evaluate(f"""
+                                () => {{
+                                    const el = document.querySelector('{escaped_selector}');
+                                    if (!el) return null;
+                                    return el.textContent || el.innerText || '';
+                                }}
+                            """)
+                            if fallback_text and fallback_text.strip():
+                                print(f"[{self.name}] ✓ Found text via page.evaluate(): {repr(fallback_text[:100])}")
+                                parsed_price = self._parse_price(fallback_text.strip())
+                                if parsed_price is not None:
+                                    return parsed_price
+                        except Exception as e:
+                            print(f"[{self.name}] ⚠ Fallback page.evaluate() failed: {e}")
+                        
                         # Take screenshot when element not found (for debugging blocking pages)
                         try:
                             if is_ci or not self.headless:
@@ -284,6 +424,17 @@ class PlaywrightWatcher(BaseWatcher):
                                 print(f"[{self.name}] 📸 Screenshot saved (element not found): {screenshot_path}")
                         except Exception as e:
                             print(f"[{self.name}] ⚠ Failed to save screenshot: {e}")
+                        
+                        # Save HTML snapshot for debugging
+                        try:
+                            if is_ci:
+                                safe_name = self.name.replace(' ', '_').replace('/', '_')
+                                html_path = os.path.join(screenshot_dir, f"{safe_name}_html_snapshot.html")
+                                with open(html_path, 'w', encoding='utf-8') as f:
+                                    f.write(html_content)
+                                print(f"[{self.name}] 📄 HTML snapshot saved: {html_path}")
+                        except Exception as e:
+                            print(f"[{self.name}] ⚠ Failed to save HTML snapshot: {e}")
                         
                         # Try to find any elements with similar classes for debugging
                         all_divs = soup.select('div.mt-auto')
@@ -309,6 +460,42 @@ class PlaywrightWatcher(BaseWatcher):
                     
                     price_text = price_element.get_text(strip=True)
                     print(f"[{self.name}] Text after strip(): {repr(price_text)}")
+                    
+                    # Enhanced logging if element is empty
+                    if not price_text:
+                        print(f"[{self.name}] ⚠ Element found but has no text content!")
+                        print(f"[{self.name}] Element HTML: {str(price_element)[:200]}")
+                        print(f"[{self.name}] Element classes: {price_element.get('class', [])}")
+                        print(f"[{self.name}] Element ID: {price_element.get('id', 'N/A')}")
+                        
+                        # Try fallback: get text via page.evaluate()
+                        try:
+                            fallback_text = page.evaluate(f"""
+                                () => {{
+                                    const el = document.querySelector('{escaped_selector}');
+                                    if (!el) return null;
+                                    return el.textContent || el.innerText || el.innerHTML || '';
+                                }}
+                            """)
+                            if fallback_text and fallback_text.strip():
+                                print(f"[{self.name}] ✓ Found text via page.evaluate() fallback: {repr(fallback_text[:100])}")
+                                price_text = fallback_text.strip()
+                        except Exception as e:
+                            print(f"[{self.name}] ⚠ Fallback page.evaluate() failed: {e}")
+                    
+                    if not price_text:
+                        print(f"[{self.name}] ✗ Cannot proceed: element has no text content")
+                        # Save HTML snapshot for debugging
+                        try:
+                            if is_ci:
+                                safe_name = self.name.replace(' ', '_').replace('/', '_')
+                                html_path = os.path.join(screenshot_dir, f"{safe_name}_empty_element.html")
+                                with open(html_path, 'w', encoding='utf-8') as f:
+                                    f.write(html_content)
+                                print(f"[{self.name}] 📄 HTML snapshot saved (empty element): {html_path}")
+                        except Exception as e:
+                            print(f"[{self.name}] ⚠ Failed to save HTML snapshot: {e}")
+                        return None
                     
                     parsed_price = self._parse_price(price_text)
                     return parsed_price
