@@ -43,21 +43,39 @@ jobs:
           import os
           import sys
           
-          watchers_config = os.environ.get("WATCHERS_CONFIG", "[]")
+          # Debug: Check if secrets are set (without showing values)
+          telegram_token_set = bool(os.environ.get("TELEGRAM_BOT_TOKEN", ""))
+          telegram_chat_set = bool(os.environ.get("TELEGRAM_CHAT_ID", ""))
+          watchers_config = os.environ.get("WATCHERS_CONFIG", "")
+          watchers_config_set = bool(watchers_config and watchers_config.strip())
+          
+          print("=" * 60)
+          print("Configuration Check:")
+          print("=" * 60)
+          print(f"TELEGRAM_BOT_TOKEN: {'✓ Set' if telegram_token_set else '✗ Missing'}")
+          print(f"TELEGRAM_CHAT_ID: {'✓ Set' if telegram_chat_set else '✗ Missing'}")
+          print(f"WATCHERS_CONFIG: {'✓ Set' if watchers_config_set else '✗ Missing or Empty'}")
+          if watchers_config_set:
+              print(f"WATCHERS_CONFIG length: {len(watchers_config)} characters")
+          print("=" * 60)
           
           # Validate and parse watchers config
           try:
               if not watchers_config or watchers_config.strip() == "":
-                  print("Warning: WATCHERS_CONFIG is empty, using empty array")
+                  print("⚠️  WARNING: WATCHERS_CONFIG is empty!")
+                  print("   → No watchers will be configured")
+                  print("   → Please set WATCHERS_CONFIG secret in GitHub repository settings")
+                  print("   → Go to: Settings → Secrets and variables → Actions → New repository secret")
                   watchers = []
               else:
                   watchers = json.loads(watchers_config)
                   if not isinstance(watchers, list):
-                      print(f"Error: WATCHERS_CONFIG must be a JSON array, got {type(watchers)}")
+                      print(f"❌ Error: WATCHERS_CONFIG must be a JSON array, got {type(watchers)}")
                       sys.exit(1)
+                  print(f"✓ Parsed {len(watchers)} watcher(s) from WATCHERS_CONFIG")
           except json.JSONDecodeError as e:
-              print(f"Error: Invalid JSON in WATCHERS_CONFIG: {e}")
-              print(f"WATCHERS_CONFIG value: {repr(watchers_config[:200])}")  # Show first 200 chars
+              print(f"❌ Error: Invalid JSON in WATCHERS_CONFIG: {e}")
+              print(f"WATCHERS_CONFIG value (first 200 chars): {repr(watchers_config[:200])}")
               sys.exit(1)
           
           config = {
@@ -68,16 +86,21 @@ jobs:
           
           # Validate required fields
           if not config["telegram_bot_token"]:
-              print("Error: TELEGRAM_BOT_TOKEN is required")
+              print("❌ Error: TELEGRAM_BOT_TOKEN is required")
               sys.exit(1)
           if not config["telegram_chat_id"]:
-              print("Error: TELEGRAM_CHAT_ID is required")
+              print("❌ Error: TELEGRAM_CHAT_ID is required")
               sys.exit(1)
           
           with open("config.json", "w", encoding="utf-8") as f:
               json.dump(config, f, indent=2, ensure_ascii=False)
           
-          print(f"✓ Created config.json with {len(watchers)} watcher(s)")
+          print(f"\n✓ Created config.json with {len(watchers)} watcher(s)")
+          if watchers:
+              print("\nWatchers configured:")
+              for i, w in enumerate(watchers, 1):
+                  print(f"  {i}. {w.get('name', 'Unnamed')} ({w.get('type', 'unknown')})")
+          print()
           EOF
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
