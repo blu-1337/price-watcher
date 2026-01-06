@@ -5,6 +5,7 @@ Playwright-based price watcher for JavaScript-heavy websites
 from bs4 import BeautifulSoup
 import re
 from typing import Optional, Dict, Any
+from datetime import datetime
 from .base import BaseWatcher
 
 
@@ -157,21 +158,65 @@ class PlaywrightWatcher(BaseWatcher):
                     });
                 """)
                 
+                # Network request monitoring and console log monitoring (for debugging in CI)
+                network_requests = []
+                network_responses = []
+                console_messages = []
+                price_requests_found = []  # Initialize early for use in logging
+                
+                if is_ci:
+                    # Log all network requests in CI
+                    def log_request(request):
+                        url = request.url
+                        method = request.method
+                        network_requests.append({'url': url, 'method': method, 'time': datetime.now().isoformat()})
+                        print(f"[{self.name}] [NETWORK] Request: {method} {url[:100]}")
+                    
+                    def log_response(response):
+                        url = response.url
+                        status = response.status
+                        network_responses.append({'url': url, 'status': status, 'time': datetime.now().isoformat()})
+                        print(f"[{self.name}] [NETWORK] Response: {status} {url[:100]}")
+                    
+                    page.on("request", log_request)
+                    page.on("response", log_response)
+                    
+                    # Capture console messages
+                    def log_console(msg):
+                        text = msg.text
+                        console_messages.append({'text': text, 'type': msg.type, 'time': datetime.now().isoformat()})
+                        print(f"[{self.name}] [CONSOLE] {msg.type}: {text[:200]}")
+                    
+                    page.on("console", log_console)
+                
                 try:
                     print(f"[{self.name}] Navigating to: {self.url}")
-                    # Use 'load' to wait for full page load, then wait for network idle
-                    page.goto(self.url, wait_until='load', timeout=self.page_timeout)
                     
-                    # Wait for network to be idle (no requests for 500ms)
-                    print(f"[{self.name}] Waiting for network to be idle (timeout: {self.network_idle_timeout}ms)...")
+                    # Progressive wait strategy: Wait for multiple load states
+                    # Step 1: Wait for DOM content to be loaded
+                    print(f"[{self.name}] Step 1: Waiting for DOM content to load...")
+                    page.goto(self.url, wait_until='domcontentloaded', timeout=self.page_timeout)
+                    print(f"[{self.name}] ✓ DOM content loaded")
+                    
+                    # Step 2: Wait for full page load
+                    print(f"[{self.name}] Step 2: Waiting for full page load...")
+                    try:
+                        page.wait_for_load_state('load', timeout=10000)
+                        print(f"[{self.name}] ✓ Page fully loaded")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Page load timeout: {e}, continuing...")
+                    
+                    # Step 3: Wait for network to be idle (no requests for 500ms)
+                    print(f"[{self.name}] Step 3: Waiting for network to be idle (timeout: {self.network_idle_timeout}ms)...")
                     try:
                         page.wait_for_load_state('networkidle', timeout=self.network_idle_timeout)
                         print(f"[{self.name}] ✓ Network is idle")
                     except Exception as e:
                         print(f"[{self.name}] ⚠ Network idle timeout: {e}, continuing anyway...")
                     
-                    # Additional wait for JavaScript to execute
-                    page.wait_for_timeout(2000)
+                    # Step 4: Additional wait for JavaScript to execute and any delayed requests
+                    print(f"[{self.name}] Step 4: Waiting additional 3000ms for JavaScript execution...")
+                    page.wait_for_timeout(3000)
                     
                     # Handle cookie consent popup (common on German/EU sites)
                     print(f"[{self.name}] Checking for cookie consent popup...")
@@ -251,8 +296,9 @@ class PlaywrightWatcher(BaseWatcher):
                             return None
                         print(f"[{self.name}] Element exists in DOM but not visible, trying anyway...")
                     
-                    # Wait for element to have actual text content (not just be present)
-                    print(f"[{self.name}] Waiting for element to have text content...")
+                    # Progressive wait strategy for element content
+                    # Step 1: Wait for element to have any text content
+                    print(f"[{self.name}] Step 1: Waiting for element to have text content...")
                     try:
                         page.wait_for_function(
                             f"document.querySelector('{escaped_selector}')?.textContent?.trim()",
@@ -272,9 +318,90 @@ class PlaywrightWatcher(BaseWatcher):
                             print(f"[{self.name}] ✗ Element has no text content")
                             return None
                     
-                    # Additional wait for any dynamic content to stabilize
-                    print(f"[{self.name}] Waiting additional 2000ms for content to stabilize...")
-                    page.wait_for_timeout(2000)
+                    # Step 2: Wait for element to have price-like content (digits and currency)
+                    print(f"[{self.name}] Step 2: Waiting for element to have price-like content (digits + currency)...")
+                    try:
+                        page.wait_for_function(
+                            f"""
+                            () => {{
+                                const el = document.querySelector('{escaped_selector}');
+                                if (!el) return false;
+                                const text = (el.textContent || el.innerText || '').trim();
+                                // Check if text contains price pattern (digits and currency symbol)
+                                return /\\d+[,\\.]?\\d*\\s*[€$£]/.test(text);
+                            }}
+                            """,
+                            timeout=self.wait_time
+                        )
+                        print(f"[{self.name}] ✓ Element has price-like content")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Price pattern wait timeout: {e}, checking anyway...")
+                        # Fallback: check if price pattern exists
+                        has_price_pattern = page.evaluate(f"""
+                            () => {{
+                                const el = document.querySelector('{escaped_selector}');
+                                if (!el) return false;
+                                const text = (el.textContent || el.innerText || '').trim();
+                                return /\\d+[,\\.]?\\d*\\s*[€$£]/.test(text);
+                            }}
+                        """)
+                        if not has_price_pattern:
+                            print(f"[{self.name}] ⚠ Element text does not match price pattern")
+                    
+                    # Step 3: Wait for text content to be stable (not changing)
+                    print(f"[{self.name}] Step 3: Waiting for element text to stabilize...")
+                    try:
+                        previous_text = page.evaluate(f"""
+                            () => {{
+                                const el = document.querySelector('{escaped_selector}');
+                                return el ? (el.textContent || el.innerText || '').trim() : '';
+                            }}
+                        """)
+                        page.wait_for_timeout(1000)  # Wait 1 second
+                        current_text = page.evaluate(f"""
+                            () => {{
+                                const el = document.querySelector('{escaped_selector}');
+                                return el ? (el.textContent || el.innerText || '').trim() : '';
+                            }}
+                        """)
+                        if previous_text == current_text:
+                            print(f"[{self.name}] ✓ Element text is stable")
+                        else:
+                            print(f"[{self.name}] ⚠ Element text changed: '{previous_text[:50]}' -> '{current_text[:50]}'")
+                            # Wait one more time for stability
+                            page.wait_for_timeout(2000)
+                            final_text = page.evaluate(f"""
+                                () => {{
+                                    const el = document.querySelector('{escaped_selector}');
+                                    return el ? (el.textContent || el.innerText || '').trim() : '';
+                                }}
+                            """)
+                            if current_text == final_text:
+                                print(f"[{self.name}] ✓ Element text stabilized after additional wait")
+                    except Exception as e:
+                        print(f"[{self.name}] ⚠ Could not check text stability: {e}")
+                    
+                    # Try to wait for specific network requests that might load price data
+                    # Look for common API endpoints that might contain price information
+                    print(f"[{self.name}] Checking for price-related network requests...")
+                    price_related_keywords = ['price', 'product', 'api', 'data', 'json', 'ajax']
+                    # Clear and repopulate price_requests_found
+                    price_requests_found.clear()
+                    
+                    if is_ci and network_responses:
+                        for response in network_responses:
+                            url_lower = response['url'].lower()
+                            if any(keyword in url_lower for keyword in price_related_keywords):
+                                price_requests_found.append(response['url'])
+                                print(f"[{self.name}] Found potential price-related request: {response['url'][:100]}")
+                    
+                    # If we found price-related requests, wait a bit more for them to complete
+                    if price_requests_found:
+                        print(f"[{self.name}] Waiting additional 2000ms for price-related requests to complete...")
+                        page.wait_for_timeout(2000)
+                    else:
+                        print(f"[{self.name}] No obvious price-related requests found, using standard wait...")
+                        page.wait_for_timeout(2000)
                     
                     # Get page URL to check for redirects
                     current_url = page.url
@@ -343,6 +470,34 @@ class PlaywrightWatcher(BaseWatcher):
                             print(f"[{self.name}] ✓ Screenshot saved: {screenshot_path}")
                     except Exception as e:
                         print(f"[{self.name}] ⚠ Failed to save screenshot: {e}")
+                    
+                    # Save debugging information in CI
+                    if is_ci:
+                        try:
+                            safe_name = self.name.replace(' ', '_').replace('/', '_')
+                            
+                            # Save network request logs
+                            if network_requests or network_responses:
+                                network_log_path = os.path.join(screenshot_dir, f"{safe_name}_network_logs.json")
+                                import json
+                                network_log = {
+                                    'requests': network_requests[-50:],  # Last 50 requests
+                                    'responses': network_responses[-50:],  # Last 50 responses
+                                    'price_related_requests': price_requests_found
+                                }
+                                with open(network_log_path, 'w', encoding='utf-8') as f:
+                                    json.dump(network_log, f, indent=2, ensure_ascii=False)
+                                print(f"[{self.name}] ✓ Network logs saved: {network_log_path}")
+                            
+                            # Save console logs
+                            if console_messages:
+                                console_log_path = os.path.join(screenshot_dir, f"{safe_name}_console_logs.json")
+                                import json
+                                with open(console_log_path, 'w', encoding='utf-8') as f:
+                                    json.dump(console_messages, f, indent=2, ensure_ascii=False)
+                                print(f"[{self.name}] ✓ Console logs saved: {console_log_path}")
+                        except Exception as e:
+                            print(f"[{self.name}] ⚠ Failed to save debugging logs: {e}")
                     
                     # Save HTML for debugging (first 2000 chars)
                     print(f"[{self.name}] First 2000 chars of HTML:")
