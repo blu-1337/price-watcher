@@ -40,3 +40,6 @@ env/
 # Logs
 *.log
 
+# Test artifacts
+test_artifacts/
+

@@ -107,7 +107,7 @@ class PlaywrightWatcher(BaseWatcher):
             print(f"[{self.name}] Starting Playwright browser (headless={self.headless})...")
             
             with self.sync_playwright() as p:
-                # Launch browser with more realistic settings to avoid detection
+                # Enhanced browser arguments for stealth (to bypass bot detection)
                 browser_args = [
                     '--disable-blink-features=AutomationControlled',
                     '--disable-dev-shm-usage',
@@ -115,20 +115,47 @@ class PlaywrightWatcher(BaseWatcher):
                     '--disable-setuid-sandbox',
                     '--disable-web-security',
                     '--disable-features=IsolateOrigins,site-per-process',
+                    '--exclude-switches=enable-automation',  # Remove automation flag
+                    '--disable-infobars',  # Remove "Chrome is being controlled" bar
+                    '--window-size=1920,1080',  # Realistic window size
+                    '--start-maximized',  # Start maximized like real browser
+                    '--disable-extensions',
+                    '--no-first-run',
+                    '--no-default-browser-check',
+                    '--disable-default-apps',
                 ]
                 
-                browser = p.chromium.launch(
-                    headless=self.headless,
-                    args=browser_args
-                )
+                # Launch browser with enhanced stealth arguments
+                # Note: Playwright Python only supports boolean for headless, not 'new'
+                # But the enhanced stealth techniques should still work
+                browser = None
+                if self.headless:
+                    print(f"[{self.name}] Launching browser in headless mode with enhanced stealth...")
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=browser_args
+                    )
+                else:
+                    browser = p.chromium.launch(
+                        headless=False,
+                        args=browser_args
+                    )
+                
+                # Enhanced browser context with realistic fingerprinting
                 context = browser.new_context(
                     user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     viewport={'width': 1920, 'height': 1080},
+                    screen={'width': 1920, 'height': 1080},  # Add screen size for realism
+                    device_scale_factor=1,
+                    is_mobile=False,
+                    has_touch=False,
+                    color_scheme='light',
                     locale='de-DE',
                     timezone_id='Europe/Berlin',
+                    permissions=['geolocation', 'notifications'],  # Realistic permissions
                     extra_http_headers={
                         'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                         'Accept-Encoding': 'gzip, deflate, br',
                         'Connection': 'keep-alive',
                         'Upgrade-Insecure-Requests': '1',
@@ -137,26 +164,192 @@ class PlaywrightWatcher(BaseWatcher):
                         'Sec-Fetch-Site': 'none',
                         'Sec-Fetch-User': '?1',
                         'Cache-Control': 'max-age=0',
+                        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                        'sec-ch-ua-mobile': '?0',
+                        'sec-ch-ua-platform': '"macOS"',
                     },
                     java_script_enabled=True,
                 )
                 page = context.new_page()
                 
-                # Remove webdriver traces (anti-detection)
+                # Enhanced anti-detection script (comprehensive stealth)
                 page.add_init_script("""
+                    // Remove webdriver property completely - CRITICAL for stealth
                     Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined
+                        get: () => undefined,
+                        configurable: true
                     });
-                    window.navigator.chrome = {
+                    
+                    // Delete webdriver property entirely if possible
+                    delete navigator.__proto__.webdriver;
+                    
+                    // Add comprehensive Chrome object with all properties
+                    window.chrome = {
                         runtime: {},
+                        loadTimes: function() {
+                            return {
+                                commitLoadTime: Date.now() - Math.random() * 1000,
+                                connectionInfo: 'http/1.1',
+                                finishDocumentLoadTime: Date.now() - Math.random() * 500,
+                                finishLoadTime: Date.now() - Math.random() * 200,
+                                firstPaintAfterLoadTime: 0,
+                                firstPaintTime: Date.now() - Math.random() * 300,
+                                navigationType: 'Other',
+                                npnNegotiatedProtocol: 'unknown',
+                                requestTime: Date.now() - Math.random() * 2000,
+                                startLoadTime: Date.now() - Math.random() * 1500,
+                                wasAlternateProtocolAvailable: false,
+                                wasFetchedViaSpdy: false,
+                                wasNpnNegotiated: false
+                            };
+                        },
+                        csi: function() {
+                            return {
+                                startE: Date.now() - Math.random() * 5000,
+                                onloadT: Date.now() - Math.random() * 3000,
+                                pageT: Math.random() * 1000 + 500,
+                                tran: 15
+                            };
+                        },
+                        app: {
+                            isInstalled: false
+                        }
                     };
-                    Object.defineProperty(navigator, 'plugins', {
-                        get: () => [1, 2, 3, 4, 5],
+                    
+                    // Override navigator.chrome
+                    Object.defineProperty(navigator, 'chrome', {
+                        get: () => window.chrome,
+                        configurable: true
                     });
+                    
+                    // Override plugins with realistic plugin list
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => {
+                            const plugins = [];
+                            for (let i = 0; i < 5; i++) {
+                                plugins.push({
+                                    name: `Plugin ${i}`,
+                                    description: `Plugin ${i} Description`,
+                                    filename: `plugin${i}.dll`,
+                                    length: 1
+                                });
+                            }
+                            return plugins;
+                        },
+                        configurable: true
+                    });
+                    
+                    // Override languages
                     Object.defineProperty(navigator, 'languages', {
                         get: () => ['de-DE', 'de', 'en'],
+                        configurable: true
                     });
+                    
+                    // Override permissions API
+                    const originalQuery = window.navigator.permissions.query;
+                    window.navigator.permissions.query = (parameters) => (
+                        parameters.name === 'notifications' ?
+                            Promise.resolve({ state: Notification.permission }) :
+                            originalQuery(parameters)
+                    );
+                    
+                    // Override getBattery if it exists
+                    if (navigator.getBattery) {
+                        navigator.getBattery = () => Promise.resolve({
+                            charging: true,
+                            chargingTime: 0,
+                            dischargingTime: Infinity,
+                            level: 1
+                        });
+                    }
+                    
+                    // Override hardwareConcurrency for realism
+                    Object.defineProperty(navigator, 'hardwareConcurrency', {
+                        get: () => 8,
+                        configurable: true
+                    });
+                    
+                    // Override deviceMemory if it exists
+                    if (navigator.deviceMemory) {
+                        Object.defineProperty(navigator, 'deviceMemory', {
+                            get: () => 8,
+                            configurable: true
+                        });
+                    }
+                    
+                    // Override platform
+                    Object.defineProperty(navigator, 'platform', {
+                        get: () => 'MacIntel',
+                        configurable: true
+                    });
+                    
+                    // Add connection property
+                    Object.defineProperty(navigator, 'connection', {
+                        get: () => ({
+                            effectiveType: '4g',
+                            rtt: 50,
+                            downlink: 10,
+                            saveData: false,
+                            downlinkMax: 10
+                        }),
+                        configurable: true
+                    });
+                    
+                    // Override vendor
+                    Object.defineProperty(navigator, 'vendor', {
+                        get: () => 'Google Inc.',
+                        configurable: true
+                    });
+                    
+                    // Override userAgent to ensure consistency
+                    const originalUserAgent = navigator.userAgent;
+                    Object.defineProperty(navigator, 'userAgent', {
+                        get: () => originalUserAgent || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        configurable: true
+                    });
+                    
+                    // Override vendorSub
+                    Object.defineProperty(navigator, 'vendorSub', {
+                        get: () => '',
+                        configurable: true
+                    });
+                    
+                    // Add missing properties that real browsers have
+                    if (!window.outerHeight) {
+                        Object.defineProperty(window, 'outerHeight', {
+                            get: () => 1080,
+                            configurable: true
+                        });
+                    }
+                    if (!window.outerWidth) {
+                        Object.defineProperty(window, 'outerWidth', {
+                            get: () => 1920,
+                            configurable: true
+                        });
+                    }
                 """)
+                
+                # Intercept requests to modify headers (remove automation indicators)
+                # Only modify navigation requests, not all requests (to avoid interference)
+                def handle_route(route):
+                    """Modify request headers to remove automation indicators"""
+                    request = route.request
+                    # Only modify main document requests, let others pass through
+                    if request.resource_type == 'document':
+                        headers = request.headers.copy()
+                        # Ensure realistic sec-ch-ua headers
+                        headers['sec-ch-ua'] = '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'
+                        headers['sec-ch-ua-mobile'] = '?0'
+                        headers['sec-ch-ua-platform'] = '"macOS"'
+                        # Remove any automation-related headers
+                        headers.pop('x-playwright', None)
+                        route.continue_(headers=headers)
+                    else:
+                        # For non-document requests, just continue normally
+                        route.continue_()
+                
+                # Route only document requests through handler (main page load)
+                page.route('**/*', handle_route)
                 
                 # Network request monitoring and console log monitoring (for debugging in CI)
                 network_requests = []
