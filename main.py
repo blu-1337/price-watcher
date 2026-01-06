@@ -118,6 +118,26 @@ class PriceWatcherManager:
     
     def run(self):
         """Run all watchers and send notifications for price alerts"""
+        # Send test message in CI environment to verify Telegram connectivity
+        is_ci = os.environ.get('CI', 'false').lower() == 'true' or os.environ.get('GITHUB_ACTIONS', 'false').lower() == 'true'
+        if is_ci:
+            print(f"\n{'='*60}")
+            print("CI Environment Detected - Sending Telegram Test Message")
+            print(f"{'='*60}\n")
+            test_message = f"""🧪 <b>Price Watcher Test Message</b>
+
+✅ Telegram connectivity test from GitHub Actions
+📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+🔧 Environment: CI/GitHub Actions
+
+This is a test message to verify that Telegram notifications are working correctly."""
+            success = self.notifier.send_message(test_message)
+            if success:
+                print("✓ Test message sent successfully to Telegram")
+            else:
+                print("✗ Failed to send test message to Telegram")
+            print()
+        
         if not self.watchers:
             print("No watchers configured. Exiting.")
             return
